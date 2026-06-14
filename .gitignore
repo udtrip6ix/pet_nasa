@@ -216,3 +216,52 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# ===== СЕКРЕТЫ =====
+.env
+.envrc
+
+# ===== PYTHON =====
+__pycache__/
+*.py[codz]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ===== AIRFLOW =====
+logs/
+plugins/
+airflow.db
+airflow-webserver.pid
+standalone_admin_password.txt
+
+# ===== SPARK =====
+derby.log
+metastore_db/
+spark-warehouse/
+
+# ===== DOCKER =====
+# volumes создаются docker-ом, не нужны в репо
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.iml
+
+# ===== OS =====
+.DS_Store
+Thumbs.db

@@ -1,0 +1,230 @@
+version: "3.9"
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file: .env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY}"
+    AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_SECRET_KEY}"
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./spark:/opt/airflow/spark
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+# ---------------------------------------------------------------------------
+services:
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL - Airflow and Metabase
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    env_file: .env
+    environment:
+      POSTGRES_USER:     "${POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB:       airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      interval: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Airflow init
+  # --------------------------------------------------------------------------
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "
+        airflow db upgrade &&
+
+        airflow users create \
+          --username ${AIRFLOW_ADMIN_USERNAME} \
+          --password ${AIRFLOW_ADMIN_PASSWORD} \
+          --firstname Admin --lastname Admin \
+          --role Admin \
+          --email ${AIRFLOW_ADMIN_EMAIL} || true &&
+
+        airflow variables set API_URL      'https://opensky-network.org/api/flights/all' &&
+        airflow variables set MINIO_BUCKET 'raw-data' &&
+        airflow variables set KEY_PREFIX   'flights' &&
+        airflow variables set CH_TABLE     'flights' &&
+        airflow variables set CH_MIN_ROWS  '1' &&
+
+        airflow connections add minio_s3 \
+          --conn-type     'aws' \
+          --conn-host     'http://minio:9000' \
+          --conn-login    '${MINIO_ROOT_USER}' \
+          --conn-password '${MINIO_ROOT_PASSWORD}' \
+          --conn-extra    '{\"bucket_name\": \"raw-data\"}' || true &&
+
+        airflow connections add clickhouse_default \
+          --conn-type     'generic' \
+          --conn-host     'clickhouse' \
+          --conn-port     '8123' \
+          --conn-login    '${CH_USER}' \
+          --conn-password '${CH_PASSWORD}' \
+          --conn-schema   'opensky' || true
+      "
+    restart: "no"
+
+  # --------------------------------------------------------------------------
+  # Airflow Webserver
+  # --------------------------------------------------------------------------
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # --------------------------------------------------------------------------
+  # Airflow Scheduler
+  # --------------------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # --------------------------------------------------------------------------
+  # MinIO
+  # --------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    env_file: .env
+    environment:
+      MINIO_ROOT_USER:     "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    env_file: .env
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
+        mc mb --ignore-existing local/raw-data &&
+        echo 'Bucket ready: raw-data'
+      "
+    restart: "no"
+
+  # --------------------------------------------------------------------------
+  # ClickHouse
+  # --------------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    env_file: .env
+    environment:
+      CLICKHOUSE_USER:     "${CH_USER}"
+      CLICKHOUSE_PASSWORD: "${CH_PASSWORD}"
+    ports:
+      - "8123:8123"
+      - "9009:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Metabase
+  # --------------------------------------------------------------------------
+  metabase-plugin-init:
+    image: curlimages/curl:latest
+    volumes:
+      - metabase_plugins:/plugins
+    entrypoint: >
+      /bin/sh -c "
+        if [ ! -f /plugins/clickhouse.metabase-driver.jar ]; then
+          echo 'Downloading ClickHouse Metabase driver...' &&
+          curl -L -o /plugins/clickhouse.metabase-driver.jar \
+            https://github.com/ClickHouse/metabase-clickhouse-driver/releases/download/1.3.3/clickhouse.metabase-driver.jar &&
+          echo 'Driver downloaded'
+        else
+          echo 'Driver already exists, skipping'
+        fi
+      "
+    restart: "no"
+
+  metabase:
+    image: metabase/metabase:v0.50.0
+    env_file: .env
+    environment:
+      MB_DB_TYPE:     postgres
+      MB_DB_HOST:     postgres
+      MB_DB_PORT:     "5432"
+      MB_DB_DBNAME:   metabase
+      MB_DB_USER:     "${POSTGRES_USER}"
+      MB_DB_PASS:     "${POSTGRES_PASSWORD}"
+      MB_SITE_LOCALE: ru
+    ports:
+      - "3000:3000"
+    volumes:
+      - metabase_plugins:/plugins
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      metabase-plugin-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+  minio_data:
+  clickhouse_data:
+  metabase_plugins:
