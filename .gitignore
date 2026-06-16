@@ -265,3 +265,23 @@ spark-warehouse/
 # ===== OS =====
 .DS_Store
 Thumbs.db
+
+#metabase data
+.metabase-data/
+
+# Volumes
+postgres-db-volume/
+minio_data/
+clickhouse_data/
+metabase-data/
+redis_data/
+
+# Airflow specific
+config/
+
+# Metabase
+metabase_plugins/
+metabase-data/
+
+# Spark/Jars
+jars/
