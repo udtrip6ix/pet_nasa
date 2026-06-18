@@ -52,7 +52,6 @@ services:
       POSTGRES_DB: ${AIRFLOW_POSTGRES_DB}
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
-      # Создаёт вторую базу для Metabase при первом старте
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${AIRFLOW_POSTGRES_USER}"]
@@ -100,12 +99,9 @@ services:
       - -c
       - |
         mkdir -p /sources/logs /sources/dags /sources/plugins
-        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
-        
-        # Ждем, пока база ответит
+
         airflow db migrate
-        
-        # Создаем пользователя
+
         airflow users create \
           --username "${AIRFLOW_ADMIN_USERNAME}" \
           --firstname "Admin" \
@@ -146,7 +142,6 @@ services:
     networks:
       - pet-project-network
 
-  # Создаёт бакет raw-data при первом старте
   minio-init:
     image: minio/mc:latest
     env_file: .env
@@ -192,12 +187,9 @@ services:
 
   # --------------------------------------------------------------------------
   # Metabase — BI поверх ClickHouse
-  # Начиная с версии 0.54+ драйвер ClickHouse встроен, отдельный плагин не нужен.
-  # Хранит свои данные в Postgres (база metabase, создаётся postgres/init.sql)
   # --------------------------------------------------------------------------
   metabase:
     image: metabase/metabase:v0.62.1
-    container_name: metabase
     env_file: .env
     environment:
       MB_DB_TYPE:     postgres
