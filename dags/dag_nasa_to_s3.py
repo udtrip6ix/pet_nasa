@@ -10,7 +10,7 @@ from airflow.operators.python import PythonOperator
 
 OWNER = "data-team"
 DAG_ID = "dag_nasa_to_s3"
-LAYER = "raw-data" # берется из MINIO_BUCKET
+LAYER = "raw-data"
 SOURCE = "asteroids"
 
 NASA_API_KEY = Variable.get("NASA_API_KEY", default_var="DEMO_KEY")
@@ -86,7 +86,8 @@ def get_and_transfer_nasa_to_s3(**context):
     con.register('asteroids_df', df)
 
     date_part = ds.format("YYYY/MM/DD")
-    s3_path = f"s3://{MINIO_BUCKET}/{KEY_PREFIX}/{date_part}/data.parquet"
+    file_name = f"{date_str}.parquet"
+    s3_path = f"s3://{MINIO_BUCKET}/{KEY_PREFIX}/{date_part}/{file_name}"
 
     logging.info(f"Saving data to {s3_path}")
 
