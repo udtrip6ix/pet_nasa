@@ -1,47 +1,47 @@
 # pet_nasa 
 
-Пет-проект по построению пайплайна для загрузки и анализа данных об астероидах из NASA NeoWs API.
+A data engineering pet project that builds a pipeline for loading and analyzing asteroid data from the NASA NeoWs API.
 
-## Архитектура
+## Architecture
 
 ```
 NASA API → Airflow DAG 1 → MinIO (Parquet) → Airflow DAG 2 → Spark → ClickHouse → Metabase
 ```
 
-**Стек:**
-- **Airflow** (CeleryExecutor) — оркестрация пайплайна
-- **MinIO** — S3-совместимое хранилище сырых данных в формате Parquet
-- **Apache Spark** — трансформация и загрузка данных
-- **ClickHouse** — аналитическое хранилище
-- **Metabase** — визуализация и дашборды
-- **PostgreSQL** — метабаза Airflow и Metabase
-- **Redis** — брокер для Celery
+**Stack:**
+- **Airflow** (CeleryExecutor) — pipeline orchestration
+- **MinIO** — S3-compatible storage for raw Parquet files
+- **Apache Spark** — data transformation and loading
+- **ClickHouse** — analytical data warehouse
+- **Metabase** — visualization and dashboards
+- **PostgreSQL** — metadata store for Airflow and Metabase
+- **Redis** — Celery message broker
 
 ---
 
-## Быстрый старт
+## Quick Start
 
-### 1. Клонировать репозиторий
+### 1. Clone the repository
 
 ```bash
 git clone <repo_url>
 cd pet_nasa
 ```
 
-### 2. Заполнить `.env`
+### 2. Configure `.env`
 
-Скопируй шаблон и заполни значения:
+Copy the template and fill in your values:
 
 ```bash
 cp .env.example .env
 ```
 
-Минимальный `.env` для запуска:
+Minimal `.env` to get started:
 
 ```env
 # Airflow
-# Генерация: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-AIRFLOW_UID=1000
+# Generate Fernet key: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+AIRFLOW_UID=1000        # find yours with: id -u
 AIRFLOW_PROJ_DIR=.
 AIRFLOW_FERNET_KEY=your-fernet-key-here
 AIRFLOW_ADMIN_USERNAME=airflow
@@ -67,43 +67,40 @@ CH_USER=default
 CH_PASSWORD=
 
 # NASA
-NASA_API_KEY=your-nasa-api-key  # получить на api.nasa.gov
+NASA_API_KEY=your-nasa-api-key  # get yours at api.nasa.gov
 ```
 
-> `AIRFLOW_UID` — узнать свой: `id -u`
-> Fernet key генерируется командой из комментария выше
-
-### 3. Первый запуск (сборка образа)
+### 3. First run (builds the image)
 
 ```bash
 docker compose up --build -d
 ```
 
-Сборка занимает несколько минут — скачиваются Spark и JAR-файлы.
+> The first build takes a few minutes — Spark and JAR files are downloaded during the build.
 
-### 4. Настроить Airflow Variables и Connections
+### 4. Configure Airflow Variables and Connections
 
-После запуска открой Airflow UI: **http://localhost:8080**
+Once the stack is up, open Airflow UI at **http://localhost:8080**
 
 #### Variables
 **Admin → Variables → + (Add)**
 
-| Key          | Value                   |
-|--------------|-------------------------|
-| NASA_API_KEY | ключ с api.nasa.gov     |
-| MINIO_BUCKET | raw-data                |
-| KEY_PREFIX   | asteroids               |
-| CH_TABLE     | nasa.asteroids          |
-| CH_MIN_ROWS  | 1                       |
-| access_key   | minioadmin              |
-| secret_key   | minioadmin              |
+| Key          | Value               |
+|--------------|---------------------|
+| NASA_API_KEY | key from api.nasa.gov |
+| MINIO_BUCKET | raw-data            |
+| KEY_PREFIX   | asteroids           |
+| CH_TABLE     | nasa.asteroids      |
+| CH_MIN_ROWS  | 1                   |
+| access_key   | minioadmin          |
+| secret_key   | minioadmin          |
 
 #### Connections
 **Admin → Connections → + (Add)**
 
 **minio_s3**
 
-| Поле                  | Значение                                                            |
+| Field                 | Value                                                               |
 |-----------------------|---------------------------------------------------------------------|
 | Connection Id         | minio_s3                                                            |
 | Connection Type       | Amazon Web Services                                                 |
@@ -113,19 +110,19 @@ docker compose up --build -d
 
 **clickhouse_default**
 
-| Поле            | Значение           |
+| Field           | Value              |
 |-----------------|--------------------|
 | Connection Id   | clickhouse_default |
 | Connection Type | Generic            |
 | Host            | clickhouse         |
 | Port            | 8123               |
 | Login           | default            |
-| Password        | (пусто)            |
+| Password        | (empty)            |
 | Schema          | nasa               |
 
 **spark_default**
 
-| Поле            | Значение      |
+| Field           | Value         |
 |-----------------|---------------|
 | Connection Id   | spark_default |
 | Connection Type | Spark         |
@@ -133,37 +130,37 @@ docker compose up --build -d
 | Deploy mode     | client        |
 | Spark binary    | spark-submit  |
 
-### 5. Включить DAG-и
+### 5. Enable DAGs
 
-В Airflow UI включи оба DAG-а:
-- `dag_nasa_to_s3` — загрузка из NASA API в MinIO
-- `dag_s3_to_ch` — загрузка из MinIO в ClickHouse через Spark
+In the Airflow UI, enable both DAGs:
+- `dag_nasa_to_s3` — fetches data from NASA API and stores it in MinIO as Parquet
+- `dag_s3_to_ch` — reads Parquet from MinIO and loads it into ClickHouse via Spark
 
 ---
 
-## Управление стеком
+## Stack Management
 
 ```bash
-# Запуск (после первой сборки)
+# Start (after the first build)
 docker compose up -d
 
-# Остановка (данные сохраняются)
+# Stop (data is preserved)
 docker compose down
 
-# Полный сброс (удаляет все данные)
+# Full reset (removes all data)
 docker compose down -v
 
-# Логи конкретного сервиса
+# View logs for a specific service
 docker compose logs -f airflow-scheduler
 ```
 
 ---
 
-## Сервисы
+## Services
 
-| Сервис       | URL                          | Логин        |
-|--------------|------------------------------|--------------|
-| Airflow UI   | http://localhost:8080        | airflow / airflow |
-| MinIO Console| http://localhost:9001        | minioadmin / minioadmin |
-| ClickHouse   | http://localhost:8123/play   | default      |
-| Metabase     | http://localhost:3000        | настраивается при первом входе |
+| Service        | URL                        | Credentials                        |
+|----------------|----------------------------|------------------------------------|
+| Airflow UI     | http://localhost:8080      | airflow / airflow                  |
+| MinIO Console  | http://localhost:9001      | minioadmin / minioadmin            |
+| ClickHouse     | http://localhost:8123/play | default / (empty)                  |
+| Metabase       | http://localhost:3000      | configured on first login          |
