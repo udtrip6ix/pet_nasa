@@ -92,8 +92,9 @@ Once the stack is up, open Airflow UI at **http://localhost:8080**
 | KEY_PREFIX   | asteroids           |
 | CH_TABLE     | nasa.asteroids      |
 | CH_MIN_ROWS  | 1                   |
-| access_key   | minioadmin          |
-| secret_key   | minioadmin          |
+| access_key   | generate in minio   |
+| secret_key   | generate in minio   |
+#### access and secret key recommend to save in cred.py file
 
 #### Connections
 **Admin → Connections → + (Add)**
