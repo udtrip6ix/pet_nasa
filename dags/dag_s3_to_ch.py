@@ -1,19 +1,9 @@
-"""
-DAG 2: dag_s3_to_ch
-ExternalTaskSensor → Spark → ClickHouse
-
-start >> wait_for_dag_nasa_to_s3 >> prepare_spark_env >> spark_s3_to_ch >> verify_clickhouse_load >> end
-"""
-
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 
 import pendulum
-
 from airflow import DAG
-from airflow.hooks.base import BaseHook
 from airflow.models import Variable
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
@@ -23,74 +13,59 @@ from airflow.utils.state import DagRunState
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Параметры
-# ---------------------------------------------------------------------------
-MINIO_BUCKET = Variable.get("MINIO_BUCKET", default_var="raw-data")
-KEY_PREFIX   = Variable.get("KEY_PREFIX",   default_var="asteroids")
-CH_TABLE     = Variable.get("CH_TABLE",     default_var="nasa.asteroids")
-CH_MIN_ROWS  = int(Variable.get("CH_MIN_ROWS", default_var="1"))
-
 SPARK_JOB_PATH = "/opt/airflow/spark/spark_job.py"
-SPARK_JARS     = ",".join([
+SPARK_JARS = ",".join([
     "/opt/spark/extra-jars/hadoop-aws-3.3.4.jar",
     "/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar",
     "/opt/spark/extra-jars/clickhouse-jdbc-0.7.1-all.jar",
 ])
 
-DEFAULT_ARGS = {
-    "owner":            "data-team",
-    "depends_on_past":  False,
-    "retries":          2,
-    "retry_delay":      timedelta(minutes=10),
-    "email_on_failure": False,
+MINIO_BUCKET = Variable.get("MINIO_BUCKET", default_var="raw-data")
+KEY_PREFIX   = Variable.get("KEY_PREFIX",   default_var="asteroids")
+CH_TABLE     = Variable.get("CH_TABLE",     default_var="nasa.asteroids")
+CH_MIN_ROWS  = int(Variable.get("CH_MIN_ROWS", default_var="1"))
+
+DEFAULT_ARGS={
+    "owner":"ud6",
+    "depends_on_past": False,
+    "retries": 2,
+    "retry_delay": pendulum.duration(minutes=10),
+    "email_on_failure" : False
+
 }
 
-
-# ---------------------------------------------------------------------------
-# Tasks
-# ---------------------------------------------------------------------------
 def prepare_spark_env(**context):
-    """Собирает env из Airflow Connections и пушит в XCom."""
+    """
+    Собирает только параметры запуска (не секреты) и пушит в XCom.
+    Credentials Spark читает сам из env-переменных контейнера.
+    """
     logical_date = context["logical_date"]
     date_part    = logical_date.strftime("%Y/%m/%d")
+    date_str     = logical_date.strftime("%Y-%m-%d")
 
-    minio_conn = BaseHook.get_connection("minio_s3")
-    ch_conn    = BaseHook.get_connection("clickhouse_default")
+    s3_path = f"s3a://{MINIO_BUCKET}/{KEY_PREFIX}/{date_part}/{date_str}.parquet"
 
-    bucket  = minio_conn.extra_dejson.get("bucket_name") or MINIO_BUCKET
-    s3_path = f"s3a://{bucket}/{KEY_PREFIX}/{date_part}/data.parquet"
-
-    env = {
-        "MINIO_ENDPOINT":   minio_conn.host,
-        "MINIO_ACCESS_KEY": minio_conn.login,
-        "MINIO_SECRET_KEY": minio_conn.password,
-        "CH_HOST":          ch_conn.host,
-        "CH_PORT":          str(ch_conn.port or 8123),
-        "CH_DATABASE":      ch_conn.schema or "nasa",
-        "CH_USER":          ch_conn.login or "default",
-        "CH_PASSWORD":      ch_conn.password or "",
-        "S3_PATH":          s3_path,
-    }
-
-    context["ti"].xcom_push(key="spark_env", value=env)
-    log.info("Spark env готов, s3_path=%s", s3_path)
+    context["ti"].xcom_push(key="s3_path", value=s3_path)
+    log.info("s3_path=%s", s3_path)
 
 
 def verify_load(**context):
-    """Проверяет что строки за нужный день появились в ClickHouse."""
+    """
+    Проверяет что строки за нужный день появились в ClickHouse.
+    Credentials читает из env-переменных контейнера напрямую.
+    """
+    import os
     import clickhouse_connect
 
     logical_date = context["logical_date"]
     date_str     = logical_date.strftime("%Y-%m-%d")
-    ch_conn      = BaseHook.get_connection("clickhouse_default")
 
     client = clickhouse_connect.get_client(
-        host=ch_conn.host,
-        port=ch_conn.port or 8123,
-        database=ch_conn.schema or "nasa",
-        username=ch_conn.login or "default",
-        password=ch_conn.password or "",
+        host=os.environ["CH_HOST"],
+        port=int(os.environ.get("CH_PORT", "8123")),
+        database=os.environ.get("CH_DATABASE", "nasa"),
+        username=os.environ.get("CH_USER", "default"),
+        password=os.environ.get("CH_PASSWORD", ""),
     )
 
     result = client.query(f"""
@@ -110,16 +85,12 @@ def verify_load(**context):
 
     log.info("Verification OK ✓")
 
-
-# ---------------------------------------------------------------------------
-# DAG
-# ---------------------------------------------------------------------------
 with DAG(
     dag_id="dag_s3_to_ch",
     default_args=DEFAULT_ARGS,
     description="ExternalTaskSensor → SparkSubmit → ClickHouse",
-    schedule_interval="@daily",
-    start_date=pendulum.datetime(2025, 5, 19, tz="UTC"),
+    schedule_interval="0 5 * * *", 
+    start_date=pendulum.datetime(2026, 5, 19, tz="UTC"),
     catchup=True,
     max_active_runs=3,
     tags=["nasa", "spark", "clickhouse"],
@@ -130,11 +101,11 @@ with DAG(
     t_sensor = ExternalTaskSensor(
         task_id="wait_for_dag_nasa_to_s3",
         external_dag_id="dag_nasa_to_s3",
-        external_task_id=None,
-        execution_date_fn=lambda dt: dt,
+        external_task_id=None,           # ждём весь DagRun, не конкретную таску
+        execution_date_fn=lambda dt: dt, # тот же logical_date
         allowed_states=[DagRunState.SUCCESS],
         failed_states=[DagRunState.FAILED],
-        mode="reschedule",
+        mode="reschedule",               # освобождает воркер между проверками
         poke_interval=30,
         timeout=60 * 60 * 2,
         check_existence=True,
@@ -151,20 +122,10 @@ with DAG(
         application=SPARK_JOB_PATH,
         jars=SPARK_JARS,
         application_args=[
-            "--s3-path",  "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['S3_PATH'] }}",
+            "--s3-path",  "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='s3_path') }}",
             "--ch-table", CH_TABLE,
         ],
-        env_vars={
-            "MINIO_ENDPOINT":   "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['MINIO_ENDPOINT'] }}",
-            "MINIO_ACCESS_KEY": "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['MINIO_ACCESS_KEY'] }}",
-            "MINIO_SECRET_KEY": "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['MINIO_SECRET_KEY'] }}",
-            "CH_HOST":          "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['CH_HOST'] }}",
-            "CH_PORT":          "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['CH_PORT'] }}",
-            "CH_DATABASE":      "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['CH_DATABASE'] }}",
-            "CH_USER":          "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['CH_USER'] }}",
-            "CH_PASSWORD":      "{{ ti.xcom_pull(task_ids='prepare_spark_env', key='spark_env')['CH_PASSWORD'] }}",
-        },
-        execution_timeout=timedelta(hours=1),
+        execution_timeout=pendulum.duration(hours=1),
         verbose=True,
     )
 

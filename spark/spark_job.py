@@ -1,16 +1,3 @@
-"""
-spark/spark_job.py
-Читает Parquet из MinIO, трансформирует и пишет в ClickHouse.
-Запускается через SparkSubmitOperator из dag_s3_to_ch.py.
-
-Все credentials получает из env-переменных,
-которые DAG собирает из Airflow Connections.
-
-Аргументы:
-  --s3-path   s3a://bucket/prefix/YYYY/MM/DD/data.parquet
-  --ch-table  имя таблицы (например nasa.asteroids)
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -18,7 +5,7 @@ import logging
 import os
 
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, to_date, unix_timestamp, current_timestamp
+from pyspark.sql.functions import col, unix_timestamp, current_timestamp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,12 +20,10 @@ def parse_args():
     p.add_argument("--ch-table", required=True, help="database.table")
     return p.parse_args()
 
-
 def create_session() -> SparkSession:
     return (
         SparkSession.builder
         .appName("nasa_asteroids_s3_to_ch")
-        # S3A / MinIO — credentials из env
         .config("spark.hadoop.fs.s3a.endpoint",               os.environ["MINIO_ENDPOINT"])
         .config("spark.hadoop.fs.s3a.access.key",             os.environ["MINIO_ACCESS_KEY"])
         .config("spark.hadoop.fs.s3a.secret.key",             os.environ["MINIO_SECRET_KEY"])
@@ -50,23 +35,19 @@ def create_session() -> SparkSession:
         .getOrCreate()
     )
 
-
 def transform(df: DataFrame) -> DataFrame:
     """
-    Приводим типы под схему ClickHouse:
-      - close_approach_date: String → Date
-      - updated_at: текущий timestamp → LongType (unix seconds для DateTime)
-      - _version: unix timestamp для ReplacingMergeTree
+    Приводим типы под схему ClickHouse.
+    close_approach_date оставляем строкой — CH сам приведёт к Date.
+    Добавляем updated_at и _version для ReplacingMergeTree.
     """
     return (
         df
         .dropDuplicates(["neo_id", "close_approach_date"])
         .na.drop(subset=["neo_id", "close_approach_date"])
-        .withColumn("close_approach_date", to_date(col("close_approach_date"), "yyyy-MM-dd"))
         .withColumn("updated_at", unix_timestamp(current_timestamp()).cast("long"))
         .withColumn("_version",   unix_timestamp(current_timestamp()).cast("long"))
     )
-
 
 def write_to_clickhouse(df: DataFrame, table: str) -> None:
     ch_url = (
@@ -104,7 +85,6 @@ def main():
 
     spark = create_session()
     try:
-        log.info("Читаем Parquet: %s", args.s3_path)
         df_raw = spark.read.parquet(args.s3_path)
         df_raw.printSchema()
         log.info("Строк прочитано: %d", df_raw.count())

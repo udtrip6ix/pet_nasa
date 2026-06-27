@@ -8,7 +8,7 @@ from airflow.models import Variable
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
 
-OWNER = "data-team"
+OWNER = "ud6"
 DAG_ID = "dag_nasa_to_s3"
 LAYER = "raw-data"
 SOURCE = "asteroids"
